@@ -24,9 +24,9 @@ async function main(): Promise<void> {
   const readDry = cfg.dryRun;
   setDashboardMeta({ dryRun: true });
   const port = cfg.dashboardPort || 8088;
-  startDashboardServer(port);
+  startDashboardServer(port, cfg.dashboardHost);
   console.log(
-    `dashboard-only venues=${cfg.venues.join(",")} readDry=${readDry} port=${port} (不下单)`
+    `dashboard-only venues=${cfg.venues.join(",")} readDry=${readDry} host=${cfg.dashboardHost} port=${port} (不下单)`
   );
 
   const exs = cfg.venues.map((v) => createExecutor(v, readDry));

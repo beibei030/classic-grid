@@ -85,7 +85,16 @@ export type RuntimeConfig = {
   venues: VenueId[];
   markets: string[];
   tickMs: number;
+  dashboardHost: string;
   dashboardPort: number;
+  recenter: {
+    enabled: boolean;
+    triggerRatio: number;
+    confirmTicks: number;
+    cooldownMs: number;
+    cancelTimeoutMs: number;
+    maxPositionNotionalUsd: number;
+  };
   grids: Record<VenueId, GridParams>;
 };
 
@@ -173,6 +182,42 @@ export function loadRuntimeConfig(): RuntimeConfig {
     0,
     Number(process.env.DASHBOARD_PORT || 8088) || 8088
   );
+  const dashboardHost = String(process.env.DASHBOARD_HOST || "127.0.0.1").trim();
+  if (!["127.0.0.1", "::1", "localhost"].includes(dashboardHost)) {
+    throw new Error(
+      `DASHBOARD_HOST=${dashboardHost} 不安全：看板只允许监听本机回环地址，请用 Tailscale Serve 代理访问`
+    );
+  }
+  const recenter = {
+    enabled: truthy(process.env.GRID_RECENTER_ENABLED),
+    triggerRatio: Math.min(
+      0.95,
+      Math.max(0.1, Number(process.env.GRID_RECENTER_RATIO || 0.65) || 0.65)
+    ),
+    confirmTicks: Math.max(
+      1,
+      Math.floor(Number(process.env.GRID_RECENTER_CONFIRM_TICKS || 3) || 3)
+    ),
+    cooldownMs: Math.max(
+      0,
+      Number(process.env.GRID_RECENTER_COOLDOWN_MS || 600_000) || 600_000
+    ),
+    cancelTimeoutMs: Math.max(
+      tickMs,
+      Number(process.env.GRID_RECENTER_CANCEL_TIMEOUT_MS || 900_000) || 900_000
+    ),
+    maxPositionNotionalUsd: Math.max(
+      0,
+      Number(process.env.GRID_RECENTER_MAX_POSITION_USD || 1) || 1
+    ),
+  };
+  if (recenter.enabled && markets.length !== 1) {
+    throw new Error("启用 GRID_RECENTER_ENABLED 时 MARKETS 必须只配置一个市场");
+  }
+  const effectiveVenues = venues.length ? venues : ALL_VENUES;
+  if (recenter.enabled && !dryRun && effectiveVenues.includes("phoenix")) {
+    throw new Error("Phoenix 实盘无法可靠回读网格订单 ID，暂不支持自动重心化");
+  }
 
   const grids = {} as Record<VenueId, GridParams>;
   for (const v of ALL_VENUES) {
@@ -213,7 +258,9 @@ export function loadRuntimeConfig(): RuntimeConfig {
     venues: venues.length ? venues : [...ALL_VENUES],
     markets: markets.length ? markets : ["BTC"],
     tickMs,
+    dashboardHost,
     dashboardPort,
+    recenter,
     grids,
   };
 }

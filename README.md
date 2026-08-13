@@ -72,6 +72,25 @@ cp .env.example .env
    看板：`http://127.0.0.1:8088/`（`/api/snapshot`）
 5. **禁止**提交 `.env` / `secrets/` / `data/`；见 [`SECURITY.md`](./SECURITY.md)
 
+### VPS 私网看板（无域名）
+
+看板强制监听回环地址，不要向公网开放 `8088`：
+
+```env
+DASHBOARD_HOST=127.0.0.1
+DASHBOARD_PORT=8088
+```
+
+在 VPS 安装并登录 Tailscale 后，将本机看板发布到 tailnet：
+
+```bash
+sudo tailscale up
+sudo tailscale serve --bg 8088
+tailscale serve status
+```
+
+使用命令输出的 `https://<设备名>.<tailnet>.ts.net` 地址访问。只有 tailnet 中获准的设备/用户可访问。使用 `tailscale serve`，不要使用会公开到互联网的 `tailscale funnel`。
+
 Windows：
 
 ```powershell
@@ -114,6 +133,28 @@ TELEGRAM_CHAT_IDS=      # 你的 chat_id；多个用逗号分隔
 | Phoenix | config / env | env | Solana 永续 |
 
 `GRID_MARGIN_FRAC` 默认 `0.7`。
+
+### 网格重心化
+
+重心化默认关闭。先使用独立账户/子账户并在 `DRY_RUN=1` 验证：
+
+```env
+GRID_RECENTER_ENABLED=1
+GRID_RECENTER_RATIO=0.65
+GRID_RECENTER_CONFIRM_TICKS=3
+GRID_RECENTER_COOLDOWN_MS=600000
+GRID_RECENTER_CANCEL_TIMEOUT_MS=900000
+GRID_RECENTER_MAX_POSITION_USD=1
+```
+
+- 市价连续 3 轮偏离锚点达到半带宽的 65% 后触发。
+- 只撤销本次进程从交易所下单回执中确认过 ID 的订单；不会按价格猜测或全市场撤单。
+- 发现旧进程、人工或其他策略挂单时立即暂停，不新增也不撤销，需人工检查并重启。
+- 持仓名义超过阈值、撤单超时或撤单期间出现持仓时暂停重铺。
+- 撤单在交易所快照确认完成后才用当前价格建立新锚点；两次重心化默认间隔至少 10 分钟。
+- 启用时 `MARKETS` 只能配置一个市场。
+
+Phoenix 当前下单接口不能可靠回传可匹配的订单 ID，因此 Phoenix 实盘开启重心化会直接拒绝启动；不要为绕过保护而改成全市场撤单。
 
 ---
 
