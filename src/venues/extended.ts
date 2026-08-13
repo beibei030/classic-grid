@@ -185,7 +185,13 @@ export class ExtendedExecutor implements VenueExecutor {
 
   async apply(intents: Intent[]): Promise<ApplyResult> {
     if (this.dryRun) return dryApply(this.id, intents);
-    const result: ApplyResult = { placed: 0, cancelled: 0, failed: 0, errors: [] };
+    const result: ApplyResult = {
+      placed: 0,
+      cancelled: 0,
+      failed: 0,
+      errors: [],
+      placedOrders: [],
+    };
     const ex = this.ensure();
     // Extended 下单 API 易 429：笔与笔之间强制间隔（默认 400ms，可用 EXTENDED_ORDER_GAP_MS 覆盖）
     const gapMs = Math.max(
@@ -202,7 +208,7 @@ export class ExtendedExecutor implements VenueExecutor {
           if (wrote > 0 && gapMs > 0) {
             await new Promise((r) => setTimeout(r, gapMs));
           }
-          await ex.placeLimitOrder({
+          const placed = await ex.placeLimitOrder({
             marketId: this.marketId(intent.order.market),
             side: intent.order.side,
             price: intent.order.price,
@@ -210,6 +216,7 @@ export class ExtendedExecutor implements VenueExecutor {
             postOnly: true,
           });
           result.placed += 1;
+          result.placedOrders.push({ id: placed.orderId, order: intent.order });
           wrote += 1;
         }
       } catch (e: any) {

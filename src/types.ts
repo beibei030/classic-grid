@@ -67,6 +67,8 @@ export type ApplyResult = {
   cancelled: number;
   failed: number;
   errors: string[];
+  /** 仅包含交易所明确返回 ID 的成功下单；用于限制自动撤单的归属范围 */
+  placedOrders: Array<{ id: string; order: DesiredOrder }>;
 };
 
 export type ActiveOrder = {

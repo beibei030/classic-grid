@@ -323,7 +323,13 @@ export class PhoenixExecutor implements VenueExecutor {
   async apply(intents: Intent[]): Promise<ApplyResult> {
     if (this.dryRun) return dryApply(this.id, intents);
     const { client, authority } = this.ensureLive();
-    const result: ApplyResult = { placed: 0, cancelled: 0, failed: 0, errors: [] };
+    const result: ApplyResult = {
+      placed: 0,
+      cancelled: 0,
+      failed: 0,
+      errors: [],
+      placedOrders: [],
+    };
     const gapMs = Math.max(0, Number(process.env.PHOENIX_ORDER_GAP_MS || 800) || 800);
     let wrote = 0;
 

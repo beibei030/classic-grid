@@ -112,6 +112,56 @@ export type RiskSnapshot = {
   maxAffordableNotional: number;
 };
 
+export type GridDistance = {
+  absolute: number;
+  spacingUnits: number;
+  halfBandRatio: number;
+};
+
+export function gridDistance(
+  mid: number,
+  anchorMid: number,
+  halfBand: number,
+  spacing: number
+): GridDistance {
+  const absolute = Math.abs(mid - anchorMid);
+  return {
+    absolute: round(absolute),
+    spacingUnits: spacing > 0 ? round(absolute / spacing) : 0,
+    halfBandRatio: halfBand > 0 ? round(absolute / halfBand) : 0,
+  };
+}
+
+export function evaluateRecenter(p: {
+  mid: number;
+  anchorMid: number;
+  halfBand: number;
+  spacing: number;
+  triggerRatio: number;
+  previousConfirmTicks: number;
+  confirmTicks: number;
+  now: number;
+  lastRecenterAt: number;
+  cooldownMs: number;
+}): {
+  distance: GridDistance;
+  nextConfirmTicks: number;
+  coolingDown: boolean;
+  ready: boolean;
+} {
+  const distance = gridDistance(p.mid, p.anchorMid, p.halfBand, p.spacing);
+  const coolingDown =
+    p.lastRecenterAt > 0 && p.now - p.lastRecenterAt < p.cooldownMs;
+  const beyond = distance.halfBandRatio >= p.triggerRatio;
+  const nextConfirmTicks = beyond && !coolingDown ? p.previousConfirmTicks + 1 : 0;
+  return {
+    distance,
+    nextConfirmTicks,
+    coolingDown,
+    ready: nextConfirmTicks >= p.confirmTicks,
+  };
+}
+
 export function computeRisk(
   grid: BuiltGrid,
   params: Pick<GridParams, "sizeBase" | "leverage" | "equityUsd" | "marginFraction">,
@@ -223,6 +273,8 @@ export function planFromFillsAndSeed(p: {
   prevActive: Map<string, { levelIndex: number; side: Side; price: number; size: number }>;
   maxWrites: number;
   seeded: boolean;
+  /** 提供时只跟踪和撤销这些已确认属于本进程的订单；其他活单仅占档 */
+  cancellableOrderIds?: ReadonlySet<string>;
   /** 达限后不再 place（如 RISEx 50/市场） */
   maxOpenOrders?: number;
 }): {
@@ -243,16 +295,20 @@ export function planFromFillsAndSeed(p: {
     const idx = matchLevelIndex(o.price, p.levels, p.spacing);
     // 对不上当前格线，或同档已有单 → 视为错位/叠单，撤掉腾名额
     if (idx < 0 || occupied.has(idx)) {
-      orphanCancels.push(o.id);
+      if (!p.cancellableOrderIds || p.cancellableOrderIds.has(o.id)) {
+        orphanCancels.push(o.id);
+      }
       continue;
     }
     occupied.add(idx);
-    nextActive.set(o.id, {
-      levelIndex: idx,
-      side: o.side,
-      price: o.price,
-      size: o.size,
-    });
+    if (!p.cancellableOrderIds || p.cancellableOrderIds.has(o.id)) {
+      nextActive.set(o.id, {
+        levelIndex: idx,
+        side: o.side,
+        price: o.price,
+        size: o.size,
+      });
+    }
   }
 
   for (const id of orphanCancels) {

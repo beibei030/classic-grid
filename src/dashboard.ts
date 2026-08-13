@@ -113,8 +113,11 @@ export function upsertDashboardVenue(row: DashboardVenueRow): void {
   persistStatus();
 }
 
-export function startDashboardServer(port: number): http.Server | null {
+export function startDashboardServer(port: number, host = "127.0.0.1"): http.Server | null {
   if (!(port > 0)) return null;
+  if (!["127.0.0.1", "::1", "localhost"].includes(host)) {
+    throw new Error(`拒绝监听非回环地址 ${host}；请通过 Tailscale Serve 访问看板`);
+  }
   const server = http.createServer((req, res) => {
     const url = req.url?.split("?")[0] || "/";
     if (url === "/api/snapshot" || url === "/api/status" || url === "/api/overview") {
@@ -131,7 +134,7 @@ export function startDashboardServer(port: number): http.Server | null {
     }
     if (url === "/api/meta") {
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ authRequired: false, port }));
+      res.end(JSON.stringify({ privateAccess: true, port }));
       return;
     }
     if (url === "/" || url === "/index.html") {
@@ -152,8 +155,8 @@ export function startDashboardServer(port: number): http.Server | null {
     res.writeHead(404, { "Content-Type": "text/plain" });
     res.end("not found");
   });
-  server.listen(port, "0.0.0.0", () => {
-    console.log(`[dashboard] http://0.0.0.0:${port}/  api=/api/snapshot`);
+  server.listen(port, host, () => {
+    console.log(`[dashboard] http://${host}:${port}/  api=/api/snapshot`);
   });
   server.on("error", (e: NodeJS.ErrnoException) => {
     console.error(`[dashboard] listen failed: ${e.message}`);

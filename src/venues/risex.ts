@@ -193,7 +193,13 @@ export class RisexExecutor implements VenueExecutor {
 
   async apply(intents: Intent[]): Promise<ApplyResult> {
     if (this.dryRun) return dryApply(this.id, intents);
-    const result: ApplyResult = { placed: 0, cancelled: 0, failed: 0, errors: [] };
+    const result: ApplyResult = {
+      placed: 0,
+      cancelled: 0,
+      failed: 0,
+      errors: [],
+      placedOrders: [],
+    };
     const ex = this.ensure();
     for (const intent of intents) {
       try {
@@ -201,7 +207,7 @@ export class RisexExecutor implements VenueExecutor {
           await ex.cancelOrder(this.marketId(intent.market), intent.orderId);
           result.cancelled += 1;
         } else {
-          await ex.placeLimitOrder({
+          const placed = await ex.placeLimitOrder({
             marketId: this.marketId(intent.order.market),
             side: intent.order.side,
             price: intent.order.price,
@@ -209,6 +215,7 @@ export class RisexExecutor implements VenueExecutor {
             postOnly: true,
           });
           result.placed += 1;
+          result.placedOrders.push({ id: placed.orderId, order: intent.order });
         }
       } catch (e: any) {
         const msg = String(e?.message || e);
