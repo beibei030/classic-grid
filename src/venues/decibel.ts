@@ -121,7 +121,13 @@ export class DecibelExecutor implements VenueExecutor {
 
   async apply(intents: Intent[]): Promise<ApplyResult> {
     if (this.dryRun) return dryApply(this.id, intents);
-    const result: ApplyResult = { placed: 0, cancelled: 0, failed: 0, errors: [] };
+    const result: ApplyResult = {
+      placed: 0,
+      cancelled: 0,
+      failed: 0,
+      errors: [],
+      placedOrders: [],
+    };
     const live = this.ensure();
     for (const intent of intents) {
       try {
@@ -129,7 +135,7 @@ export class DecibelExecutor implements VenueExecutor {
           await live.cancel(sym(intent.market), intent.orderId);
           result.cancelled += 1;
         } else {
-          await live.placeLimit({
+          const placed = await live.placeLimit({
             symbol: sym(intent.order.market),
             side: intent.order.side,
             price: intent.order.price,
@@ -137,6 +143,7 @@ export class DecibelExecutor implements VenueExecutor {
             postOnly: true,
           });
           result.placed += 1;
+          result.placedOrders.push({ id: placed.orderId, order: intent.order });
         }
       } catch (e: any) {
         result.failed += 1;

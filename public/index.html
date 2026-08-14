@@ -256,6 +256,14 @@
     const ORDER = ["extended", "risex", "decibel", "n1", "phoenix"];
 
     function el(id) { return document.getElementById(id); }
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
     function setText(id, text, className) {
       const node = el(id);
       if (!node) return;
@@ -486,7 +494,7 @@
           <td class="${okOff && o.realizedPnl != null ? cls(o.realizedPnl) : ""}">${okOff && o.realizedPnl != null ? signed(o.realizedPnl) : "-"}</td>
           <td>${o.fills != null ? o.fills : "-"}</td>
           <td>${n(v.completedRungs)}</td>
-          <td class="meta" style="white-space:normal;max-width:160px">${v.lastError || (v.seeded ? "运行中" : "待铺")}</td>
+          <td class="meta" style="white-space:normal;max-width:160px">${escapeHtml(v.lastError || (v.seeded ? "运行中" : "待铺"))}</td>
         </tr>`;
       }).join("") + (() => {
         let posU = 0, rungs = 0, ooSum = 0, expSum = 0, eq = 0, eqN = 0, upnl = 0, upnlN = 0, okN = 0, knownN = 0, fills = 0, fillN = 0;

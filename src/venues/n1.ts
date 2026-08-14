@@ -195,7 +195,13 @@ export class N1Executor implements VenueExecutor {
     if (process.env.N1_TRADING_ARMED !== "YES") {
       throw new Error("N1 trading not armed：设 N1_TRADING_ARMED=YES");
     }
-    const result: ApplyResult = { placed: 0, cancelled: 0, failed: 0, errors: [] };
+    const result: ApplyResult = {
+      placed: 0,
+      cancelled: 0,
+      failed: 0,
+      errors: [],
+      placedOrders: [],
+    };
     for (const intent of intents) {
       try {
         await this.ensureSession();
@@ -216,6 +222,7 @@ export class N1Executor implements VenueExecutor {
           });
           if (!receipt.orderId) throw new Error("N1 place missing orderId");
           result.placed += 1;
+          result.placedOrders.push({ id: String(receipt.orderId), order: intent.order });
         }
       } catch (e: any) {
         result.failed += 1;
