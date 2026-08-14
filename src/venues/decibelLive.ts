@@ -99,7 +99,8 @@ export class DecibelLive {
     this.write = new sdk.DecibelWriteDex(netCfg, this.account, {
       nodeApiKey: apiKey,
       gasPriceManager: gas,
-      skipSimulate: !!gasStationApiKey,
+      // SDK 0.6/0.7 会把节点返回的“最大可能 gas”再次乘 2，自付 gas 时必然超出余额上限。
+      skipSimulate: true,
     });
 
     this.subaccount =
