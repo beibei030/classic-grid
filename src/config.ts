@@ -3,13 +3,11 @@ import { loadEnv } from "./loadEnv.js";
 
 /**
  * 以各所启动瞬间 mid 为锚点。
- * - Extended：80 格、30x，带宽约 ±4.6%
- * - Phoenix / Nado：80 格、30x，带宽 ±4.5%（同 Ext 资金模板）
- * - PopDEX：80 格、20x、±4.5%（同 Ext/Phx 带宽；权益默认 800，可 POPDEX_EQUITY_USD 覆盖）
- * - Decibel / N1：80 格、30x、带宽 ±5%（费率偏贵，略加半幅；下单 post-only/maker）
- * - Pacifica / Lighter RH：80 格、30x、±5%、1000U × 60% 保证金
- * - RISEx：46 格（所上挂单硬顶 50）、25x、带宽 ±5%（半幅与 Dec/N1 对齐，格数不能上 80）
- * 其它所保证金占用 70%（MARGIN_FRAC）；默认权益预算 800U
+ * 现档（与正在跑的 Decibel / PopDEX 相同）：90 格、30x、1000U × 60%，
+ * 前紧后松，中心 ±4%、外层 ±8%。Extended / Phoenix / Phoenix2 / Nado 用这套。
+ * - N1：100 格、保证金 45%、中心加密到 80% 档（0 费，挂单上限约 100）
+ * - RISEx：46 格、25x（所上挂单硬顶 50、杠杆上限）
+ * - Entropy / Pacifica / Lighter：未并进这套，仍是旧档
  */
 export const REF_MID = 65_000;
 export const HALF_BAND = 3000;
@@ -166,6 +164,16 @@ function isLitProgVenue(venue: VenueId): boolean {
   );
 }
 
+/** 与正在跑的 Decibel / PopDEX 同一套，不依赖 GRID_PROFILE。 */
+function usesDecTemplate(venue: VenueId): boolean {
+  return (
+    venue === "extended" ||
+    venue === "phoenix" ||
+    venue === "phoenix2" ||
+    venue === "nado"
+  );
+}
+
 export function anchorGrid(base: GridParams, mid: number): GridParams {
   if (!(mid > 0)) throw new Error(`无效 mid=${mid}`);
   if (base.innerHalfPct && base.outerHalfPct && base.innerHalfPct < base.outerHalfPct) {
@@ -304,7 +312,7 @@ function leverageFor(venue: VenueId, fallbackGridLev: number): number {
 }
 
 function equityFor(venue: VenueId): number {
-  if (isLitProgVenue(venue)) {
+  if (isLitProgVenue(venue) || usesDecTemplate(venue)) {
     const n = Number(
       venue === "decibel"
         ? process.env.DECIBEL_EQUITY_USD
@@ -312,7 +320,9 @@ function equityFor(venue: VenueId): number {
           ? process.env.N1_EQUITY_USD
           : venue === "popdex"
             ? process.env.POPDEX_EQUITY_USD
-            : process.env.RISEX_EQUITY_USD
+            : venue === "risex"
+              ? process.env.RISEX_EQUITY_USD
+              : ""
     );
     if (Number.isFinite(n) && n > 0) return n;
     return 1000;
@@ -354,7 +364,7 @@ function equityFor(venue: VenueId): number {
 }
 
 function marginFor(venue: VenueId, fallback: number): number {
-  if (isLitProgVenue(venue)) {
+  if (isLitProgVenue(venue) || usesDecTemplate(venue)) {
     const n = Number(
       venue === "decibel"
         ? process.env.DECIBEL_MARGIN_FRAC
@@ -362,10 +372,12 @@ function marginFor(venue: VenueId, fallback: number): number {
           ? process.env.N1_MARGIN_FRAC
           : venue === "popdex"
             ? process.env.POPDEX_MARGIN_FRAC
-            : process.env.RISEX_MARGIN_FRAC
+            : venue === "risex"
+              ? process.env.RISEX_MARGIN_FRAC
+              : ""
     );
     if (Number.isFinite(n) && n >= 0.05 && n <= 1) return n;
-    return 0.6;
+    return venue === "n1" ? 0.45 : 0.6;
   }
   if (venue === "pacifica") {
     const n = Number(process.env.PACIFICA_MARGIN_FRAC);
@@ -417,12 +429,13 @@ export function loadRuntimeConfig(): RuntimeConfig {
   const grids = {} as Record<VenueId, GridParams>;
   for (const v of ALL_VENUES) {
     const litProg = isLitProgVenue(v);
-    const coreGridCount = litProg
-      ? v === "decibel" || v === "popdex"
-        ? 90
-        : v === "n1"
-          ? 100
-          : 46
+    const current = litProg || usesDecTemplate(v);
+    const coreGridCount = current
+      ? v === "n1"
+        ? 100
+        : v === "risex"
+          ? 46
+          : 90
       : v === "popdex"
         ? Math.max(
             2,
@@ -430,12 +443,12 @@ export function loadRuntimeConfig(): RuntimeConfig {
               VENUE_GRID_COUNT.popdex
           )
         : VENUE_GRID_COUNT[v];
-    const lowerExtraLevels = litProg ? 0 : VENUE_LOWER_EXTRA[v] || 0;
-    const upperLevelDelta = litProg ? 0 : VENUE_UPPER_DELTA[v] || 0;
+    const lowerExtraLevels = current ? 0 : VENUE_LOWER_EXTRA[v] || 0;
+    const upperLevelDelta = current ? 0 : VENUE_UPPER_DELTA[v] || 0;
     const gridCount =
       coreGridCount + lowerExtraLevels + upperLevelDelta;
     const venueLev = leverageFor(v, leverage);
-    const venueHalf = litProg
+    const venueHalf = current
       ? Math.round(REF_MID * 0.08)
       : v === "risex"
         ? Math.max(
@@ -501,7 +514,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
       ...(v === "entropy" || v === "pacifica" ? { feeRate: 0.00015 } : {}),
       ...(v === "lighter" ? { feeRate: 0 } : {}),
       // 换带宽时加快撤挂收敛（仓位不动，只改单）
-      ...(v === "decibel" || v === "n1" || v === "entropy" || v === "pacifica" || (litProg && v === "popdex")
+      ...(v === "decibel" || v === "n1" || v === "entropy" || v === "pacifica" || (current && (v === "popdex" || usesDecTemplate(v)))
         ? { maxWritesPerTick: 40 }
         : {}),
       ...(v === "lighter" ? { maxWritesPerTick: 15 } : {}),
@@ -510,7 +523,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
       gridCount,
       ...(lowerExtraLevels > 0 ? { lowerExtraLevels } : {}),
       ...(upperLevelDelta !== 0 ? { upperLevelDelta } : {}),
-      ...(litProg
+      ...(current
         ? {
             innerHalfPct: 0.04,
             outerHalfPct: 0.08,
