@@ -6,6 +6,17 @@ let lastSentAt = 0;
 const MIN_GAP_MS = 1500;
 const recentKeys = new Map<string, number>();
 
+type TgJob = {
+  id: string;
+  text: string;
+  createdAt: number;
+  tries: number;
+};
+
+let tradeQueue: TgJob[] = [];
+let tradePumping = false;
+let lastPosMap: Record<string, number> | null = null;
+
 const VENUE_LABEL: Record<string, string> = {
   extended: "Extended",
   risex: "RISEx",
@@ -15,6 +26,9 @@ const VENUE_LABEL: Record<string, string> = {
   phoenix2: "ph2号",
   nado: "Nado",
   popdex: "PopDEX",
+  entropy: "Entropy",
+  pacifica: "Pacifica",
+  lighter: "Lighter",
 };
 
 function venueLabel(id: string): string {
@@ -56,15 +70,126 @@ function shouldSend(key: string, ttlMs: number): boolean {
   return true;
 }
 
-export async function tgSend(
-  text: string,
-  opts?: { key?: string; ttlMs?: number }
-): Promise<boolean> {
+function dataFile(name: string): string {
+  const dir = path.resolve(process.cwd(), "data");
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, name);
+}
+
+function loadTradeQueue(): void {
+  try {
+    const p = dataFile("tg-queue.json");
+    if (!fs.existsSync(p)) return;
+    const j = JSON.parse(fs.readFileSync(p, "utf8"));
+    if (Array.isArray(j)) tradeQueue = j.filter((x) => x && typeof x.text === "string");
+  } catch {
+    /* ignore */
+  }
+}
+
+function saveTradeQueue(): void {
+  try {
+    fs.writeFileSync(dataFile("tg-queue.json"), JSON.stringify(tradeQueue), "utf8");
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 上次已入队/已记账的仓位；重启后用这个比现仓，成交不会被第一拍吃掉 */
+export function loadRememberedPositions(): Record<string, number> {
+  if (lastPosMap) return { ...lastPosMap };
+  lastPosMap = {};
+  try {
+    const p = dataFile("tg-last-pos.json");
+    if (fs.existsSync(p)) {
+      const j = JSON.parse(fs.readFileSync(p, "utf8"));
+      for (const [k, v] of Object.entries(j || {})) {
+        const n = Number(v);
+        if (Number.isFinite(n)) lastPosMap[k] = n;
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  if (!Object.keys(lastPosMap).length) {
+    try {
+      const p = path.resolve(process.cwd(), "data", "status.json");
+      if (fs.existsSync(p)) {
+        const j = JSON.parse(fs.readFileSync(p, "utf8"));
+        for (const v of j.venues || []) {
+          const id = String(v.venue || "");
+          const pos = Number(v.position);
+          const mid = Number(v.mid);
+          if (id && Number.isFinite(pos) && mid > 1000) lastPosMap[id] = pos;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return { ...lastPosMap };
+}
+
+export function rememberVenuePos(venue: string, pos: number): void {
+  if (!Number.isFinite(pos)) return;
+  if (!lastPosMap) loadRememberedPositions();
+  lastPosMap![venue] = pos;
+  try {
+    fs.writeFileSync(dataFile("tg-last-pos.json"), JSON.stringify(lastPosMap), "utf8");
+  } catch {
+    /* ignore */
+  }
+}
+
+function enqueueTrade(text: string): void {
+  tradeQueue.push({
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    text,
+    createdAt: Date.now(),
+    tries: 0,
+  });
+  saveTradeQueue();
+  void pumpTradeQueue();
+}
+
+async function pumpTradeQueue(): Promise<void> {
+  if (tradePumping) return;
+  tradePumping = true;
+  try {
+    if (!tradeQueue.length) loadTradeQueue();
+    while (tradeQueue.length) {
+      const job = tradeQueue[0];
+      const ok = await tgSendRaw(job.text);
+      if (ok) {
+        tradeQueue.shift();
+        saveTradeQueue();
+        continue;
+      }
+      job.tries += 1;
+      saveTradeQueue();
+      const wait = Math.min(60_000, 2000 * 2 ** Math.min(job.tries - 1, 5));
+      console.error(`[tg] trade retry in ${wait}ms tries=${job.tries} left=${tradeQueue.length}`);
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  } finally {
+    tradePumping = false;
+  }
+  if (tradeQueue.length) void pumpTradeQueue();
+}
+
+export function startTgPump(): void {
+  loadTradeQueue();
+  if (tradeQueue.length) {
+    console.log(`[tg] resume queue n=${tradeQueue.length}`);
+    void pumpTradeQueue();
+  }
+}
+
+async function tgSendRaw(text: string): Promise<boolean> {
   if (!enabled()) return false;
   const tok = token();
   const chats = chatIds();
   if (!tok || !chats.length) return false;
-  if (opts?.key && !shouldSend(opts.key, opts.ttlMs ?? 60_000)) return false;
 
   const now = Date.now();
   const wait = lastSentAt + MIN_GAP_MS - now;
@@ -78,7 +203,7 @@ export async function tgSend(
       const url = `https://api.telegram.org/bot${tok}/sendMessage?chat_id=${encodeURIComponent(
         chat
       )}&text=${body}&disable_web_page_preview=1`;
-      const res = await fetch(url, { method: "GET", signal: AbortSignal.timeout(12_000) });
+      const res = await fetch(url, { method: "GET", signal: AbortSignal.timeout(20_000) });
       if (res.ok) ok = true;
       else console.error(`[tg] HTTP ${res.status} chat=${chat}`);
     } catch (e: any) {
@@ -86,6 +211,14 @@ export async function tgSend(
     }
   }
   return ok;
+}
+
+export async function tgSend(
+  text: string,
+  opts?: { key?: string; ttlMs?: number }
+): Promise<boolean> {
+  if (opts?.key && !shouldSend(opts.key, opts.ttlMs ?? 60_000)) return false;
+  return tgSendRaw(text);
 }
 
 /** 穿价 / post-only / 链上瞬时拒单 / 坏回包：可下轮重试，不发 TG、不挂看板红字 */
@@ -108,9 +241,29 @@ export function isSoftPlaceError(venue: string, msg: string): boolean {
     return /2008|post-only|crosses the book|穿价/i.test(short);
   }
   if (venue === "popdex") {
-    return /post.?only|cross|穿价|would be (immediately )?filled|rejected/i.test(short);
+    return /post.?only|cross|穿价|would be (immediately )?filled|rejected|unknown RPC error/i.test(
+      short
+    );
   }
-  return false;
+  if (venue === "entropy") {
+    return /post.?only|alo|would immediately match|crosses|reduce only/i.test(short);
+  }
+  if (venue === "pacifica") {
+    return /post.?only|alo|would immediately match|crosses|reduce only|would be (immediately )?filled/i.test(
+      short
+    );
+  }
+  if (venue === "lighter") {
+    return /post.?only|would immediately|crosses|invalid price|not enough margin|insufficient/i.test(
+      short
+    );
+  }
+  if (venue === "n1" || venue === "decibel" || venue === "risex") {
+    return /Failed to place|post.?only|cross|穿价|would be (immediately )?filled|rejected|max open/i.test(
+      short
+    );
+  }
+  return /Failed to place|post.?only|crosses the book|穿价/i.test(short);
 }
 
 export async function tgError(venue: string, msg: string): Promise<void> {
@@ -215,18 +368,14 @@ export async function tgOpen(p: {
   openOrders: Array<{ side: string }>;
 }): Promise<void> {
   const { buy, sell } = countBuySell(p.openOrders);
-  await tgSend(
+  enqueueTrade(
     tradeLines({
       venue: p.venue,
       head: `${venueLabel(p.venue)} · ${p.kind} +${fmtFillU(p.fillBase, p.mid)}`,
       buyOrders: buy,
       sellOrders: sell,
       bagPos: fmtBagPos(p.posAfter, p.mid),
-    }),
-    {
-      key: `open:${p.venue}:${p.kind}:${p.posAfter.toFixed(6)}:${Math.floor(Date.now() / 8_000)}`,
-      ttlMs: 2_000,
-    }
+    })
   );
 }
 
@@ -246,19 +395,22 @@ export async function tgClose(p: {
     p.pnlUsd != null && Number.isFinite(p.pnlUsd)
       ? fmtPnlLabel(p.pnlUsd)
       : "盈利";
-  await tgSend(
+  enqueueTrade(
     tradeLines({
       venue: p.venue,
       head: `${venueLabel(p.venue)} · ${p.kind} · ${pnlLabel}`,
       buyOrders: buy,
       sellOrders: sell,
       bagPos: fmtBagPos(p.posAfter, p.mid),
-    }),
-    {
-      key: `close:${p.venue}:${p.kind}:${p.posAfter.toFixed(6)}:${Math.floor(Date.now() / 8_000)}`,
-      ttlMs: 2_000,
-    }
+    })
   );
+}
+
+export async function tgStop(venue: string, msg: string): Promise<void> {
+  await tgSend(`🛑 [${venueLabel(venue)}] ${msg}`.slice(0, 400), {
+    key: `stop:${venue}:${String(msg).slice(0, 60)}`,
+    ttlMs: 90_000,
+  });
 }
 
 export async function tgBoot(summary: string): Promise<void> {

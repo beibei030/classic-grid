@@ -1,6 +1,15 @@
 import type { Intent, VenueSnapshot } from "../types.js";
 import { DecibelLive } from "./decibelLive.js";
-import { dryApply, type ApplyResult, type VenueExecutor } from "./types.js";
+import {
+  dryApply,
+  type ApplyResult,
+  type FundingQuote,
+  type HardStopSpec,
+  type HedgeOrder,
+  type HedgeOrderResult,
+  type TopOfBook,
+  type VenueExecutor,
+} from "./types.js";
 
 function sym(market: string): string {
   return market.toUpperCase().replace(/-USD$/, "").replace(/-PERP$/, "");
@@ -10,7 +19,16 @@ export class DecibelExecutor implements VenueExecutor {
   readonly id = "decibel" as const;
   private live: DecibelLive | null = null;
   private equityCache: { at: number; value: number | undefined } = { at: 0, value: undefined };
+  /** 刚下过的限价，订单簿回显慢时同一价不再补第二张 */
+  private recentPlaces = new Map<number, number>();
   constructor(private dryRun: boolean) {}
+
+  private pruneRecentPlaces(): void {
+    const now = Date.now();
+    for (const [px, exp] of this.recentPlaces) {
+      if (now > exp) this.recentPlaces.delete(px);
+    }
+  }
 
   async connect(): Promise<void> {
     if (this.dryRun) return;
@@ -123,12 +141,35 @@ export class DecibelExecutor implements VenueExecutor {
     if (this.dryRun) return dryApply(this.id, intents);
     const result: ApplyResult = { placed: 0, cancelled: 0, failed: 0, errors: [] };
     const live = this.ensure();
+    let liveMid = 0;
+    try {
+      liveMid = await live.mid("BTC");
+    } catch {
+      /* 穿价闸用 0 则跳过 */
+    }
     for (const intent of intents) {
       try {
         if (intent.type === "cancel") {
           await live.cancel(sym(intent.market), intent.orderId);
           result.cancelled += 1;
         } else {
+          const px = Math.round(intent.order.price * 100) / 100;
+          if (!(px > 0)) throw new Error(`无效价格 ${intent.order.price}`);
+          this.pruneRecentPlaces();
+          if (this.recentPlaces.has(px)) {
+            console.log(`[decibel] skip duplicate place @${px}`);
+            continue;
+          }
+          if (liveMid > 0) {
+            if (intent.order.side === "sell" && px <= liveMid) {
+              console.log(`[decibel] skip cross sell@${px} mid=${liveMid.toFixed(2)}`);
+              continue;
+            }
+            if (intent.order.side === "buy" && px >= liveMid) {
+              console.log(`[decibel] skip cross buy@${px} mid=${liveMid.toFixed(2)}`);
+              continue;
+            }
+          }
           await live.placeLimit({
             symbol: sym(intent.order.market),
             side: intent.order.side,
@@ -136,6 +177,7 @@ export class DecibelExecutor implements VenueExecutor {
             size: intent.order.size,
             postOnly: true,
           });
+          this.recentPlaces.set(px, Date.now() + 120_000);
           result.placed += 1;
         }
       } catch (e: any) {
@@ -154,9 +196,60 @@ export class DecibelExecutor implements VenueExecutor {
     await this.ensure().cancelAll(sym(market));
   }
 
-  async closePosition(market: string): Promise<void> {
+  async placeHedgeLimit(order: HedgeOrder): Promise<HedgeOrderResult> {
     if (this.dryRun) {
-      console.log(`[decibel:dry] closePosition ${market}`);
+      return { accepted: true, confirmed: true, orderId: "dry-dec-limit" };
+    }
+    if (!(Number(order.price) > 0)) throw new Error("Dec hedge limit 缺少价格");
+    const result = await this.ensure().placeLimit({
+      symbol: sym(order.market),
+      side: order.side,
+      price: Number(order.price),
+      size: order.size,
+      postOnly: true,
+      reduceOnly: order.reduceOnly === true,
+      clientOrderId: order.clientOrderId,
+    });
+    return {
+      accepted: true,
+      confirmed: true,
+      orderId: String(result.orderId),
+    };
+  }
+
+  async placeHedgeIoc(order: HedgeOrder): Promise<HedgeOrderResult> {
+    if (this.dryRun) {
+      return { accepted: true, confirmed: true, orderId: "dry-dec-ioc" };
+    }
+    if (!(Number(order.price) > 0)) throw new Error("Dec hedge IOC 缺少限价");
+    const result = await this.ensure().placeIoc({
+      symbol: sym(order.market),
+      side: order.side,
+      price: Number(order.price),
+      size: order.size,
+      reduceOnly: order.reduceOnly === true,
+      clientOrderId: order.clientOrderId || `hedge-${Date.now()}`,
+    });
+    return {
+      accepted: true,
+      confirmed: true,
+      orderId: String(result.orderId),
+    };
+  }
+
+  async topOfBook(market: string): Promise<TopOfBook> {
+    const book = await this.ensure().topOfBook(sym(market));
+    return { ...book, updatedAt: Date.now() };
+  }
+
+  async fundingQuote(market: string): Promise<FundingQuote> {
+    const quote = await this.ensure().fundingQuote(sym(market));
+    return { ...quote, source: "decibel-market-price" };
+  }
+
+  async closePosition(market: string, sizeBase?: number | null): Promise<void> {
+    if (this.dryRun) {
+      console.log(`[decibel:dry] closePosition ${market}${sizeBase != null ? ` size=${sizeBase}` : ""}`);
       return;
     }
     const live = this.ensure();
@@ -164,7 +257,8 @@ export class DecibelExecutor implements VenueExecutor {
     const pos = Number(snap.position) || 0;
     if (Math.abs(pos) < 1e-12) return;
     const side = pos > 0 ? "sell" : "buy";
-    const size = Math.abs(pos);
+    const size =
+      sizeBase != null && sizeBase > 0 ? Math.min(Math.abs(sizeBase), Math.abs(pos)) : Math.abs(pos);
     const mid = snap.mid > 0 ? snap.mid : 0;
     if (!(mid > 0)) throw new Error("closePosition: no mid");
     const price = pos > 0 ? mid * 0.992 : mid * 1.008;
@@ -176,5 +270,10 @@ export class DecibelExecutor implements VenueExecutor {
       reduceOnly: true,
       clientOrderId: `flat-${Date.now()}`,
     });
+  }
+
+  async syncHardStops(_spec: HardStopSpec): Promise<{ armed: boolean; note?: string }> {
+    // Decibel 公开 SDK 无稳定 stop-market 字段；硬止损由 loop 每 tick IOC 兜底。
+    return { armed: false, note: "bot-poll" };
   }
 }

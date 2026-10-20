@@ -710,6 +710,193 @@ async function fetchPopdex(since: number): Promise<OfficialVenueDay> {
   }
 }
 
+async function fetchEntropy(since: number): Promise<OfficialVenueDay> {
+  try {
+    const { HttpTransport, InfoClient } = await import("@nktkas/hyperliquid");
+    const { privateKeyToAccount } = await import("viem/accounts");
+    const raw =
+      process.env.ENTROPY_PRIVATE_KEY?.trim() ||
+      process.env.HYPERLIQUID_PRIVATE_KEY?.trim() ||
+      "";
+    const file =
+      process.env.ENTROPY_KEY_PATH?.trim() ||
+      path.resolve(process.cwd(), "secrets", "entropy.key");
+    const key = raw || (fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim() : "");
+    if (!key) return empty("entropy", "无 ENTROPY_PRIVATE_KEY");
+    const hex = (key.startsWith("0x") ? key : `0x${key}`) as `0x${string}`;
+    const addr = privateKeyToAccount(hex).address;
+    const info = new InfoClient({ transport: new HttpTransport() });
+    const fills = (await (info as any).userFillsByTime?.({ user: addr, startTime: since })) ||
+      (await info.userFills({ user: addr }));
+    let volume = 0;
+    let fees = 0;
+    let n = 0;
+    for (const t of fills || []) {
+      const ts = Number(t.time || 0);
+      if (ts && ts < since) continue;
+      if (String(t.coin || "") !== "BTC") continue;
+      volume += Math.abs(Number(t.px) * Number(t.sz));
+      fees += Math.abs(Number(t.fee || 0));
+      n += 1;
+    }
+    return {
+      venue: "entropy",
+      ok: true,
+      source: "official",
+      volume: round(volume, 2),
+      fees: round(fees, 4),
+      realizedPnl: null,
+      fills: n,
+      closeFills: null,
+      feeMaker: 0.00015,
+      feeTaker: 0.00045,
+      note: "HL userFills BTC",
+      updatedAt: new Date().toISOString(),
+    };
+  } catch (e: any) {
+    return empty("entropy", String(e?.message || e).slice(0, 120));
+  }
+}
+
+async function fetchPacifica(since: number): Promise<OfficialVenueDay> {
+  try {
+    loadEnv();
+    const { Keypair } = await import("@solana/web3.js");
+    const bs58 = (await import("bs58")).default;
+    const raw = process.env.PACIFICA_PRIVATE_KEY?.trim() || "";
+    const file =
+      process.env.PACIFICA_KEY_PATH?.trim() ||
+      path.resolve(process.cwd(), "secrets", "pacifica.key");
+    const text = raw || (fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim() : "");
+    if (!text) return empty("pacifica", "无 PACIFICA_PRIVATE_KEY");
+    const bytes = text.startsWith("[")
+      ? Uint8Array.from(JSON.parse(text))
+      : bs58.decode(text.replace(/\s/g, ""));
+    const secret = bytes.length === 32 ? Keypair.fromSeed(bytes).secretKey : bytes;
+    const account = Keypair.fromSecretKey(secret).publicKey.toBase58();
+    const api = (process.env.PACIFICA_API_URL || "https://api.pacifica.fi/api/v1").replace(
+      /\/$/,
+      ""
+    );
+    let cursor = "";
+    let volume = 0;
+    let fees = 0;
+    let pnl = 0;
+    let n = 0;
+    let closeN = 0;
+    for (let page = 0; page < 5; page++) {
+      const q = new URLSearchParams({
+        account,
+        symbol: "BTC",
+        start_time: String(since),
+        limit: "100",
+      });
+      if (cursor) q.set("cursor", cursor);
+      const r = await fetch(`${api}/trades/history?${q}`, { headers: { Accept: "*/*" } });
+      const j: any = await r.json();
+      if (!r.ok || j?.success === false) {
+        return empty("pacifica", String(j?.error || r.status).slice(0, 120));
+      }
+      for (const t of j?.data || []) {
+        const ts = Number(t.created_at || 0);
+        if (ts && ts < since) continue;
+        volume += Math.abs(Number(t.price) * Number(t.amount));
+        fees += Math.abs(Number(t.fee || 0));
+        const p = Number(t.pnl);
+        if (Number.isFinite(p)) pnl += p;
+        n += 1;
+        if (/^close_/i.test(String(t.side || ""))) closeN += 1;
+      }
+      if (!j?.has_more || !j?.next_cursor) break;
+      cursor = String(j.next_cursor);
+    }
+    return {
+      venue: "pacifica",
+      ok: true,
+      source: "official",
+      volume: round(volume, 2),
+      fees: round(fees, 4),
+      realizedPnl: round(pnl, 4),
+      fills: n,
+      closeFills: closeN,
+      feeMaker: 0.00015,
+      feeTaker: 0.0004,
+      note: "trades/history BTC",
+      updatedAt: new Date().toISOString(),
+    };
+  } catch (e: any) {
+    return empty("pacifica", String(e?.message || e).slice(0, 120));
+  }
+}
+
+async function fetchLighter(since: number): Promise<OfficialVenueDay> {
+  try {
+    loadEnv();
+    const authPath = path.resolve(process.cwd(), "data", "lighter-auth.json");
+    if (!fs.existsSync(authPath)) return empty("lighter", "等网格连上后拉成交");
+    const authJ = JSON.parse(fs.readFileSync(authPath, "utf8"));
+    const token = String(authJ?.token || "");
+    const acc = Number(authJ?.accountIndex || process.env.LIGHTER_ACCOUNT_INDEX || 0);
+    if (!token || !acc) return empty("lighter", "无 auth");
+    const api = (process.env.LIGHTER_API_URL || "https://api.rh.lighter.xyz").replace(/\/$/, "");
+    let cursor = "";
+    let volume = 0;
+    let fees = 0;
+    let pnl = 0;
+    let n = 0;
+    for (let page = 0; page < 8; page++) {
+      const q = new URLSearchParams({
+        sort_by: "timestamp",
+        limit: "100",
+        account_index: String(acc),
+        market_id: "1",
+        sort_dir: "desc",
+      });
+      if (cursor) q.set("cursor", cursor);
+      const r = await fetch(`${api}/api/v1/trades?${q}`, {
+        headers: { Accept: "*/*", Authorization: token },
+      });
+      const j: any = await r.json();
+      if (!r.ok || (j?.code && j.code !== 200)) {
+        return empty("lighter", String(j?.message || r.status).slice(0, 120));
+      }
+      let stop = false;
+      for (const t of j?.trades || []) {
+        const ts = Number(t.timestamp || t.time || 0);
+        if (ts && ts < since) {
+          stop = true;
+          break;
+        }
+        const px = Number(t.price || 0);
+        const sz = Number(t.size || t.base_amount || 0);
+        volume += Math.abs(px * sz);
+        fees += Math.abs(Number(t.fee || t.usdc_fee || 0));
+        const p = Number(t.pnl ?? t.realized_pnl);
+        if (Number.isFinite(p)) pnl += p;
+        n += 1;
+      }
+      if (stop || !j?.next_cursor) break;
+      cursor = String(j.next_cursor);
+    }
+    return {
+      venue: "lighter",
+      ok: true,
+      source: "official",
+      volume: round(volume, 2),
+      fees: round(fees, 4),
+      realizedPnl: round(pnl, 4),
+      fills: n,
+      closeFills: null,
+      feeMaker: 0,
+      feeTaker: 0,
+      note: "RH trades BTC",
+      updatedAt: new Date().toISOString(),
+    };
+  } catch (e: any) {
+    return empty("lighter", String(e?.message || e).slice(0, 120));
+  }
+}
+
 let cache: OfficialBundle | null = null;
 let inflight: Promise<OfficialBundle> | null = null;
 let lastRefreshAt = 0;
@@ -757,16 +944,20 @@ export async function refreshOfficialStats(opts?: {
     const dayKey = shanghaiDayKey();
     const since = dayStartMs(dayKey);
     const prev = cache;
-    const [extended, risex, decibel, n1, phoenix, phoenix2, nado, popdex] = await Promise.all([
-      fetchExtended(since),
-      fetchRisex(since),
-      fetchDecibel(since),
-      fetchN1(since),
-      fetchPhoenix(since, "phoenix"),
-      fetchPhoenix(since, "phoenix2"),
-      fetchNado(since),
-      fetchPopdex(since),
-    ]);
+    const [extended, risex, decibel, n1, phoenix, phoenix2, nado, popdex, entropy, pacifica, lighter] =
+      await Promise.all([
+        fetchExtended(since),
+        fetchRisex(since),
+        fetchDecibel(since),
+        fetchN1(since),
+        fetchPhoenix(since, "phoenix"),
+        fetchPhoenix(since, "phoenix2"),
+        fetchNado(since),
+        fetchPopdex(since),
+        fetchEntropy(since),
+        fetchPacifica(since),
+        fetchLighter(since),
+      ]);
     cache = {
       dayKey,
       dayStartMs: since,
@@ -779,6 +970,9 @@ export async function refreshOfficialStats(opts?: {
         phoenix2: keepOrFresh(dayKey, phoenix2, prev),
         nado: keepOrFresh(dayKey, nado, prev),
         popdex: keepOrFresh(dayKey, popdex, prev),
+        entropy: keepOrFresh(dayKey, entropy, prev),
+        pacifica: keepOrFresh(dayKey, pacifica, prev),
+        lighter: keepOrFresh(dayKey, lighter, prev),
       },
       updatedAt: new Date().toISOString(),
     };

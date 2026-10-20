@@ -191,6 +191,58 @@ export class DecibelLive {
     return null;
   }
 
+  async topOfBook(symbol: string): Promise<{ bid: number; ask: number }> {
+    const m = this.cfg(symbol);
+    if (!m) throw new Error(`unknown ${symbol}`);
+    const raw =
+      (await this.orderbook(m.market_name)) ??
+      (await this.fetchOrderbookRest(m.market_addr));
+    const body: any = raw?.data ?? raw;
+    const bids: any[] = body?.bids ?? body?.buy ?? [];
+    const asks: any[] = body?.asks ?? body?.sell ?? [];
+    const px = (row: any) =>
+      Number(
+        Array.isArray(row)
+          ? row[0]
+          : row?.price ?? row?.px ?? row?.limit_price ?? 0
+      );
+    const bid = bids.reduce((best, row) => Math.max(best, px(row)), 0);
+    const ask = asks.reduce((best, row) => {
+      const n = px(row);
+      return n > 0 ? Math.min(best, n) : best;
+    }, Number.POSITIVE_INFINITY);
+    if (!(bid > 0 && Number.isFinite(ask) && ask > bid)) {
+      throw new Error("Decibel orderbook 无有效 bid/ask");
+    }
+    return { bid, ask };
+  }
+
+  async fundingQuote(symbol: string): Promise<{
+    rate: number;
+    intervalMs?: number;
+  }> {
+    const m = this.cfg(symbol);
+    if (!m) throw new Error(`unknown ${symbol}`);
+    const raw = await this.pricesByName(m.market_name);
+    const row: any = Array.isArray(raw) ? raw[0] : raw;
+    const direct = Number(
+      row?.funding_rate ?? row?.fundingRate ?? Number.NaN
+    );
+    const bps = Number(row?.funding_rate_bps ?? Number.NaN);
+    const rate = Number.isFinite(direct)
+      ? direct
+      : Number.isFinite(bps)
+        ? bps / 10_000
+        : Number.NaN;
+    if (!Number.isFinite(rate)) throw new Error("Decibel 无 funding rate");
+    const periodS = Number(row?.funding_period_s ?? row?.fundingPeriodS);
+    return {
+      rate,
+      intervalMs:
+        Number.isFinite(periodS) && periodS > 0 ? periodS * 1000 : undefined,
+    };
+  }
+
   async mid(symbol: string): Promise<number> {
     const m = this.cfg(symbol);
     if (!m) throw new Error(`unknown ${symbol}`);
@@ -420,11 +472,9 @@ export class DecibelLive {
     const priceByAddr = new Map<string, any>(
       (priceRows || []).map((p: any) => [String(p.market), p])
     );
-    // 幽灵单过滤：Decibel indexer 会把已成交/已撤的旧单残留（remaining_size 不归零）。
-    // 这些残留单的 unix_ms 是数天前（实测 9~13 天），而正常挂单是近期的。
-    // 用 48 小时阈值过滤陈旧单；误删的远价单会被 seed 立即补回，代价远小于档位永久缺失。
-    const now = Date.now();
-    const GHOST_AGE_MS = 48 * 60 * 60 * 1000;
+    // 不再按 unix_ms 年龄丢单：远端未成交单会挂好几天，48h 会把真单藏掉，
+    // bot 当空洞去补，穿价/去重挡上，看板从 80 掉到 60。真残留靠 remaining_size
+    // 和 loop 错位撤（对不上当前格线 / EORDER_NOT_FOUND）。
     const out: Array<{
       orderId: string;
       symbol: string;
@@ -442,8 +492,6 @@ export class DecibelLive {
       if (!items.length) break;
       for (const o of items) {
         if (o.is_tpsl) continue;
-        const unixMs = Number(o.unix_ms || 0);
-        if (unixMs > 0 && now - unixMs > GHOST_AGE_MS) continue;
         const base = this.addrToBase.get(o.market) ?? baseSymbol(String(o.market));
         if (sym && base !== sym) continue;
         const m = this.cfg(base);
@@ -575,7 +623,7 @@ export class DecibelLive {
   async fetchOrderbookRest(marketAddr: string) {
     const base = this.sdk.MAINNET_CONFIG.tradingHttpUrl.replace(/\/$/, "");
     const key = process.env.DECIBEL_API_KEY?.trim();
-    const url = `${base}/api/v1/orderbook?ticker_id=${encodeURIComponent(marketAddr)}`;
+    const url = `${base}/api/v1/orderbook?market_address=${encodeURIComponent(marketAddr)}`;
     const res = await fetch(url, {
       headers: {
         Authorization: `Bearer ${key}`,

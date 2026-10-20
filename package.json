@@ -6,10 +6,17 @@
   "description": "经典网格：Extended/RISEx/Decibel/N1/Phoenix/Nado/PopDEX",
   "scripts": {
     "start": "node --import tsx src/cli/run.ts",
+    "start:three": "node --import tsx src/cli/run-three.ts",
+    "start:dec-pop": "node --import tsx src/cli/run-dec-pop.ts",
+    "start:four": "node --import tsx src/cli/run-four.ts",
+    "start:lit-prog": "node --import tsx src/cli/run-lit-prog.ts",
+    "start:pacifica": "node --import tsx src/cli/run-pacifica.ts",
     "status": "node --import tsx src/cli/status.ts",
     "flat": "node --import tsx src/cli/flat.ts",
     "dashboard": "node --import tsx src/cli/dashboard.ts",
-    "test": "node --import tsx test/grid.test.ts"
+    "test": "node --import tsx test/grid.test.ts && node --import tsx test/hedge.test.ts",
+    "test:hedge": "node --import tsx test/hedge.test.ts",
+    "start:hedge": "node --import tsx src/cli/run-hedge.ts"
   },
   "engines": {
     "node": ">=20"

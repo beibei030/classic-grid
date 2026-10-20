@@ -1,6 +1,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   ingestVenuesForLedger,
@@ -12,6 +13,7 @@ import {
   trimLedgerCalendar,
 } from "./ledger.js";
 import type { OfficialBundle } from "./officialStats.js";
+import type { StopLossView } from "./stopLoss.js";
 import type { VenueId } from "./types.js";
 import {
   getBotPauseState,
@@ -53,6 +55,7 @@ export type DashboardVenueRow = {
   officialRealizedPnl?: number | null;
   officialSource?: "official" | "unavailable" | "local";
   lastError?: string;
+  stopLoss?: StopLossView;
   updatedAt: string;
 };
 
@@ -239,6 +242,46 @@ export function startDashboardServer(port: number): http.Server | null {
       });
       return;
     }
+    if (url === "/api/rehang" && req.method === "POST") {
+      const chunks: Buffer[] = [];
+      req.on("data", (c) => chunks.push(c));
+      req.on("end", () => {
+        try {
+          const raw = Buffer.concat(chunks).toString("utf8") || "{}";
+          const j = JSON.parse(raw);
+          const venue = String(j?.venue || "").trim().toLowerCase();
+          const allowed = new Set(["decibel", "n1", "popdex", "risex"]);
+          if (!allowed.has(venue)) {
+            res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ ok: false, error: "venue must be decibel|n1|popdex|risex" }));
+            return;
+          }
+          const bat = path.resolve(process.cwd(), "deploy", "run-hg.bat");
+          if (!fs.existsSync(bat)) {
+            res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+            res.end(JSON.stringify({ ok: false, error: "run-hg.bat missing" }));
+            return;
+          }
+          const child = spawn("cmd.exe", ["/c", bat, venue], {
+            cwd: path.resolve(process.cwd()),
+            detached: true,
+            stdio: "ignore",
+            windowsHide: true,
+          });
+          child.unref();
+          console.log(`[dashboard] rehang queued venue=${venue}`);
+          res.writeHead(200, {
+            "Content-Type": "application/json; charset=utf-8",
+            "Cache-Control": "no-store",
+          });
+          res.end(JSON.stringify({ ok: true, venue, started: true }));
+        } catch (e: any) {
+          res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ ok: false, error: String(e?.message || e).slice(0, 200) }));
+        }
+      });
+      return;
+    }
     if (url === "/api/venue-control" && req.method === "GET") {
       const body = {
         venues: allVenueControl(),
@@ -267,6 +310,7 @@ export function startDashboardServer(port: number): http.Server | null {
             "pause",
             "resume",
             "flat-reseed",
+            "refill",
           ];
           const validVenues = [
             "extended",
@@ -277,6 +321,9 @@ export function startDashboardServer(port: number): http.Server | null {
             "phoenix2",
             "nado",
             "popdex",
+            "entropy",
+            "pacifica",
+            "lighter",
           ];
           if (!venue || !validVenues.includes(venue) || !actions.includes(action)) {
             res.writeHead(400, {

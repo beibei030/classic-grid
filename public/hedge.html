@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Dec × Pop 对冲测试</title>
+  <style>
+    :root{color-scheme:dark;font-family:Inter,system-ui,sans-serif;background:#0f1115;color:#e7eaf0}
+    body{margin:0;padding:22px;max-width:1100px;margin:auto}
+    h1{font-size:22px;margin:0 0 6px}.muted{color:#9299a8;font-size:13px}
+    .top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}
+    .pill{padding:5px 9px;border:1px solid #343a46;border-radius:999px;font-size:12px}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:18px 0}
+    .card{border:1px solid #2b303b;border-radius:9px;padding:13px;background:#151820}
+    .label{font-size:12px;color:#9299a8}.value{font-size:21px;font-weight:650;margin-top:5px}
+    table{width:100%;border-collapse:collapse;margin-top:12px}
+    th,td{text-align:left;padding:9px;border-bottom:1px solid #292e38;font-size:13px}
+    th{color:#9299a8}.danger{color:#ff8c8c}.ok{color:#78d69a}
+    button{background:#b33a3a;color:white;border:0;border-radius:7px;padding:9px 13px;cursor:pointer}
+    pre{white-space:pre-wrap;max-height:280px;overflow:auto;font-size:12px;color:#b9c0ce}
+  </style>
+</head>
+<body>
+  <div class="top">
+    <div><h1>Decibel × PopDEX 对冲测试</h1><div class="muted">独立进程，不复用经典网格</div></div>
+    <div><span id="mode" class="pill">加载中</span> <button id="stop">紧急停止并平仓</button></div>
+  </div>
+  <div class="grid">
+    <div class="card"><div class="label">状态</div><div id="phase" class="value">-</div></div>
+    <div class="card"><div class="label">轮次</div><div id="round" class="value">-</div></div>
+    <div class="card"><div class="label">共同 Maker 价格</div><div id="price" class="value">-</div></div>
+    <div class="card"><div class="label">资金费差</div><div id="funding" class="value">-</div></div>
+    <div class="card"><div class="label">方向</div><div id="direction" class="value">-</div></div>
+    <div class="card"><div class="label">合计权益</div><div id="equity" class="value">-</div></div>
+  </div>
+  <table>
+    <thead><tr><th>交易所</th><th>Bid / Ask</th><th>资金费</th><th>仓位</th><th>挂单</th><th>权益</th></tr></thead>
+    <tbody>
+      <tr><td>Decibel</td><td id="decBook">-</td><td id="decFunding">-</td><td id="decPos">-</td><td id="decOrders">-</td><td id="decEq">-</td></tr>
+      <tr><td>PopDEX</td><td id="popBook">-</td><td id="popFunding">-</td><td id="popPos">-</td><td id="popOrders">-</td><td id="popEq">-</td></tr>
+    </tbody>
+  </table>
+  <div id="error" class="danger" style="margin-top:14px"></div>
+  <h2 style="font-size:15px;margin-top:20px">最近日志</h2>
+  <pre id="logs"></pre>
+  <script>
+    const $=id=>document.getElementById(id);
+    const n=v=>Number(v||0);
+    const f=(v,d=2)=>Number.isFinite(Number(v))?Number(v).toFixed(d):"-";
+    async function load(){
+      try{
+        const s=await fetch("/api/hedge",{cache:"no-store"}).then(r=>r.json());
+        $("mode").textContent=s.live?"LIVE":"SHADOW";
+        $("mode").className="pill "+(s.live?"danger":"ok");
+        $("phase").textContent=s.phase;
+        $("round").textContent=`${s.round}/${s.maxRounds}`;
+        $("price").textContent=s.commonPrice?f(s.commonPrice,1):"-";
+        $("funding").textContent=s.fundingGapBp!=null?`${f(s.fundingGapBp,3)} bp`:"-";
+        $("direction").textContent=s.direction||"-";
+        $("equity").textContent=s.currentEquity!=null?`${f(s.currentEquity)}U`:"-";
+        $("decBook").textContent=s.decBook?`${f(s.decBook.bid,1)} / ${f(s.decBook.ask,1)}`:"-";
+        $("popBook").textContent=s.popBook?`${f(s.popBook.bid,1)} / ${f(s.popBook.ask,1)}`:"-";
+        $("decFunding").textContent=s.decFunding?`${f(n(s.decFunding.rate)*100,5)}%`:"-";
+        $("popFunding").textContent=s.popFunding?`${f(n(s.popFunding.rate)*100,5)}%`:"-";
+        $("decPos").textContent=f(s.dec?.position,6);$("popPos").textContent=f(s.pop?.position,6);
+        $("decOrders").textContent=s.dec?.openOrders?.length??"-";$("popOrders").textContent=s.pop?.openOrders?.length??"-";
+        $("decEq").textContent=s.dec?.equityUsd!=null?`${f(s.dec.equityUsd)}U`:"-";
+        $("popEq").textContent=s.pop?.equityUsd!=null?`${f(s.pop.equityUsd)}U`:"-";
+        $("error").textContent=s.error||"";
+        $("logs").textContent=(s.logs||[]).slice().reverse().join("\n");
+      }catch(e){$("error").textContent=String(e)}
+    }
+    $("stop").onclick=async()=>{if(confirm("确认紧急停止、撤单并平仓？"))await fetch("/api/hedge/stop",{method:"POST"})};
+    load();setInterval(load,1000);
+  </script>
+</body>
+</html>

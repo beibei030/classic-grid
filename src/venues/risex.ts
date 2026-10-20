@@ -39,6 +39,10 @@ type RiseExchange = {
   cancelOrder(marketId: number, orderId: string): Promise<unknown>;
   cancelAllConfirmed(marketId: number, opts?: { attempts?: number }): Promise<unknown>;
   closePosition(marketId: number): Promise<unknown>;
+  reducePositionIoc(
+    marketId: number,
+    sizeBase: number
+  ): Promise<{ ok?: boolean; skipped?: boolean }>;
   setLeverage(marketId: number, leverage: number): Promise<unknown>;
   markets: Map<number, { name: string; symbol?: string }>;
 };
@@ -236,6 +240,15 @@ export class RisexExecutor implements VenueExecutor {
       console.log(`[risex:dry] closePosition ${market}`);
       return;
     }
-    await this.ensure().closePosition(this.marketId(market));
+    const ex = this.ensure();
+    const marketId = this.marketId(market);
+    await ex._refreshAllPositions();
+    const pos = ex.getPosition(marketId);
+    const size = Math.abs(Number(pos?.sizeBase) || 0);
+    if (!(size > 0)) return;
+    const result = await ex.reducePositionIoc(marketId, size);
+    if (!result?.ok && !result?.skipped) {
+      throw new Error("RISEx reduce-only close failed");
+    }
   }
 }

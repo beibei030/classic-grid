@@ -19,7 +19,8 @@ export type VenueControlAction =
   | "close-half" // 平 50% 仓位
   | "pause" // 单所暂停
   | "resume" // 恢复（holdSide 回 neutral + 解除暂停）
-  | "flat-reseed"; // 清仓撤单 + 重锚重铺
+  | "flat-reseed" // 清仓撤单 + 重锚重铺
+  | "refill"; // 按现带宽把缺档补满，不挪带、不撤现有单
 
 export type VenueControlState = {
   holdSide: HoldSide;

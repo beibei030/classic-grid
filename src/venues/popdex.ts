@@ -29,7 +29,15 @@ import {
 import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import type { Intent, LiveOrder, Side, VenueSnapshot } from "../types.js";
 import { loadEnv } from "../loadEnv.js";
-import { dryApply, type ApplyResult, type VenueExecutor } from "./types.js";
+import {
+  dryApply,
+  type ApplyResult,
+  type FundingQuote,
+  type HedgeOrder,
+  type HedgeOrderResult,
+  type TopOfBook,
+  type VenueExecutor,
+} from "./types.js";
 
 const API = "https://api.popdex.xyz";
 const ORDER = "0x0000000000000000000000000000000000001000" as const;
@@ -201,8 +209,21 @@ export class PopdexExecutor implements VenueExecutor {
   private minNotional = 10;
   private wallet: ReturnType<typeof createWalletClient> | null = null;
   private pub: ReturnType<typeof createPublicClient> | null = null;
+  /** 刚广播过的限价，避免订单簿回显慢时同一价再下一张 */
+  private recentPlaces = new Map<number, number>();
+  /** 上次可信仓位/挂单，用来丢掉偶发空簿 */
+  private lastGoodBook: { position: number; orders: number; equity?: number; at: number } | null =
+    null;
+  private lastEquity: number | undefined;
 
   constructor(private dryRun: boolean) {}
+
+  private pruneRecentPlaces(): void {
+    const now = Date.now();
+    for (const [px, exp] of this.recentPlaces) {
+      if (now > exp) this.recentPlaces.delete(px);
+    }
+  }
 
   private roundPrice(px: number): number {
     const t = this.tickSize > 0 ? this.tickSize : 1;
@@ -258,7 +279,14 @@ export class PopdexExecutor implements VenueExecutor {
     this.address = this.account.address;
     const transport = custom({
       async request({ method, params }) {
-        return rpc(method, (params as unknown[]) ?? []);
+        const args = [...((params as unknown[]) ?? [])];
+        // Pop 的 latest nonce 明显落后于写节点要求；写交易必须取 pending，
+        // 否则会持续报 "nonce is too low" 而无法补单/撤单。
+        if (method === "eth_getTransactionCount") {
+          if (args.length >= 2) args[1] = "pending";
+          else args.push("pending");
+        }
+        return rpc(method, args);
       },
     });
     this.wallet = createWalletClient({
@@ -297,6 +325,55 @@ export class PopdexExecutor implements VenueExecutor {
     return mid;
   }
 
+  async topOfBook(_market: string): Promise<TopOfBook> {
+    const book = await apiGet<any>(
+      `/api/v1/public/market/orderbook?category=Futures&symbol=${encodeURIComponent(this.symbol)}&levels=5`
+    );
+    const bid = num(book?.bids?.[0]?.[0]);
+    const ask = num(book?.asks?.[0]?.[0]);
+    if (!(bid > 0 && ask > bid)) throw new Error("PopDEX 无有效 bid/ask");
+    return { bid, ask, updatedAt: Date.now() };
+  }
+
+  async fundingQuote(_market: string): Promise<FundingQuote> {
+    const rows = await apiGet<any[]>(
+      `/api/v1/market/funding-rate?symbol=${encodeURIComponent(this.symbol)}`
+    );
+    const row = Array.isArray(rows) ? rows[0] : rows;
+    const rate = num(row?.fundingRate, NaN);
+    if (!Number.isFinite(rate)) throw new Error("PopDEX 无 funding rate");
+    const intervalHours = num(row?.fundingRateInterval, NaN);
+    const next = num(row?.nextUpdate, NaN);
+    return {
+      rate,
+      intervalMs:
+        Number.isFinite(intervalHours) && intervalHours > 0
+          ? intervalHours * 3_600_000
+          : undefined,
+      nextFundingAt: Number.isFinite(next) && next > 0 ? next : undefined,
+      source: "popdex-funding-rate",
+    };
+  }
+
+  private async readEquity(addr: string): Promise<number | undefined> {
+    for (let i = 0; i < 3; i++) {
+      try {
+        const overview = await apiGet<any>(`/api/v1/account/${addr}/overview`);
+        const eq = num(
+          overview?.accountEquity ?? overview?.totalCollateral ?? overview?.balances?.[0]?.usdValue,
+          NaN
+        );
+        if (Number.isFinite(eq) && eq > 0) {
+          this.lastEquity = eq;
+          return eq;
+        }
+      } catch {
+        /* Pop overview 常 10700，重试后再用缓存 */
+      }
+    }
+    return this.lastEquity;
+  }
+
   async snapshot(market: string): Promise<VenueSnapshot> {
     if (this.dryRun && !this.address) {
       const mid = await this.mid().catch(() => 100_000);
@@ -304,13 +381,29 @@ export class PopdexExecutor implements VenueExecutor {
     }
     const addr = this.address || (await this.resolveAddressOnly());
     const mid = await this.mid();
-    const [overview, positions, orders] = await Promise.all([
-      apiGet<any>(`/api/v1/account/${addr}/overview`).catch(() => null),
-      apiGet<any[]>(`/api/v1/account/${addr}/positions`).catch(() => []),
-      apiGet<any[]>(
+    const overviewEq = await this.readEquity(addr);
+    let positions: any[] = [];
+    let orders: any[] = [];
+    let readErr = "";
+    try {
+      positions = await apiGet<any[]>(`/api/v1/account/${addr}/positions`);
+    } catch (e: any) {
+      readErr = String(e?.message || e);
+    }
+    try {
+      orders = await apiGet<any[]>(
         `/api/v1/account/${addr}/orders?status=pending&category=Futures&symbol=${encodeURIComponent(this.symbol)}`
-      ).catch(() => []),
-    ]);
+      );
+    } catch (e: any) {
+      readErr = readErr || String(e?.message || e);
+    }
+    if (readErr) {
+      const prev = this.lastGoodBook;
+      if (prev && Date.now() - prev.at < 300_000 && (Math.abs(prev.position) > 1e-8 || prev.orders > 0)) {
+        throw new Error(`stale empty book (${readErr.slice(0, 80)})`);
+      }
+      throw new Error(readErr);
+    }
 
     let position = 0;
     let unrealizedPnl: number | undefined;
@@ -340,7 +433,9 @@ export class PopdexExecutor implements VenueExecutor {
       const sideRaw = String(o.side || "").toLowerCase();
       const side: Side = sideRaw.startsWith("s") ? "sell" : "buy";
       openOrders.push({
-        id: String(o.orderId || o.clientOid || ""),
+        id: o.orderId
+          ? `${String(o.orderId)}:${String(o.clientOid || "")}`
+          : String(o.clientOid || ""),
         market,
         side,
         price: this.roundPrice(num(o.price)),
@@ -349,14 +444,36 @@ export class PopdexExecutor implements VenueExecutor {
       });
     }
 
-    const equityUsd = overview ? num(overview.accountEquity, NaN) : NaN;
+    const equityUsd =
+      overviewEq != null && Number.isFinite(overviewEq) && overviewEq > 0
+        ? overviewEq
+        : this.lastEquity;
+    const liveOrders = openOrders.filter((o) => o.id);
+    const empty = Math.abs(position) < 1e-12 && liveOrders.length === 0;
+    const prev = this.lastGoodBook;
+    if (
+      empty &&
+      prev &&
+      Date.now() - prev.at < 90_000 &&
+      (Math.abs(prev.position) > 1e-8 || prev.orders > 0)
+    ) {
+      throw new Error(
+        `stale empty book (last pos=${prev.position} oo=${prev.orders})`
+      );
+    }
+    this.lastGoodBook = {
+      position,
+      orders: liveOrders.length,
+      equity: equityUsd,
+      at: Date.now(),
+    };
     return {
       venue: this.id,
       market,
       mid,
       position,
-      openOrders: openOrders.filter((o) => o.id),
-      equityUsd: Number.isFinite(equityUsd) && equityUsd > 0 ? equityUsd : undefined,
+      openOrders: liveOrders,
+      equityUsd,
       unrealizedPnl:
         unrealizedPnl != null && Number.isFinite(unrealizedPnl) ? unrealizedPnl : undefined,
     };
@@ -411,11 +528,15 @@ export class PopdexExecutor implements VenueExecutor {
       try {
         if (intent.type === "cancel") {
           const id = String(intent.orderId || "");
-          if (!/^\d+$/.test(id)) throw new Error(`无效 orderId=${id}`);
+          const [orderId, oidRaw = ""] = id.split(":", 2);
+          if (!/^\d+$/.test(orderId)) throw new Error(`无效 orderId=${id}`);
+          const oid = oidRaw
+            ? pad(stringToHex(oidRaw.slice(0, 31)), { size: 32, dir: "right" })
+            : pad("0x", { size: 32 });
           const data = encodeFunctionData({
             abi: cancelAbi,
             functionName: "cancelOrder",
-            args: [this.address as Hex, BigInt(id), pad("0x", { size: 32 })],
+            args: [this.address as Hex, BigInt(orderId), oid],
           });
           if (wrote > 0 && gapMs > 0) await new Promise((r) => setTimeout(r, gapMs));
           await this.send(ORDER, data, 300_000n);
@@ -426,6 +547,11 @@ export class PopdexExecutor implements VenueExecutor {
           if (!(px > 0)) throw new Error(`无效价格 ${intent.order.price}`);
           const size = this.ensureSize(intent.order.size, px);
           if (!(size > 0)) throw new Error(`size 过小 lot=${this.lotSize}`);
+          this.pruneRecentPlaces();
+          if (this.recentPlaces.has(px)) {
+            console.log(`[popdex] skip duplicate place @${px}`);
+            continue;
+          }
 
           if (liveMid > 0) {
             if (intent.order.side === "sell" && px <= liveMid) {
@@ -463,7 +589,17 @@ export class PopdexExecutor implements VenueExecutor {
               0n,
             ],
           });
-          await this.send(ORDER, data);
+          try {
+            await this.send(ORDER, data);
+          } catch (e: any) {
+            // Pop RPC 偶发返回 unknown error，但交易实际已接收；先冷却该价位，
+            // 等订单簿回显后再决定是否重试，避免同价重复挂单。
+            if (/unknown RPC error/i.test(String(e?.message || e))) {
+              this.recentPlaces.set(px, Date.now() + 120_000);
+            }
+            throw e;
+          }
+          this.recentPlaces.set(px, Date.now() + 120_000);
           result.placed += 1;
           wrote += 1;
         }
@@ -494,16 +630,84 @@ export class PopdexExecutor implements VenueExecutor {
     await this.send(ORDER, data, 400_000n);
   }
 
-  async closePosition(market: string): Promise<void> {
+  private async submitHedgeOrder(
+    order: HedgeOrder,
+    marketOrder: boolean
+  ): Promise<HedgeOrderResult> {
     if (this.dryRun) {
-      console.log(`[popdex:dry] closePosition ${market}`);
+      return {
+        accepted: true,
+        confirmed: true,
+        orderId: marketOrder ? "dry-pop-ioc" : "dry-pop-limit",
+      };
+    }
+    if (!this.address) throw new Error("PopDEX 未 connect");
+    const mid = await this.mid();
+    const size = this.ensureSize(order.size, mid);
+    if (!(size > 0)) throw new Error("PopDEX hedge size 过小");
+    const px = marketOrder ? 0 : this.roundPrice(Number(order.price));
+    if (!marketOrder && !(px > 0)) throw new Error("PopDEX hedge limit 缺少价格");
+    const oid = clientOid(order.clientOrderId || `h${Date.now().toString(36)}`);
+    const orderParams = packOrderParams({
+      category: Category.Futures,
+      orderType: marketOrder ? OrderType.Market : OrderType.Limit,
+      side: order.side === "buy" ? SideEnum.Buy : SideEnum.Sell,
+      timeInForce: marketOrder ? TimeInForce.IOC : TimeInForce.PostOnly,
+      marketUnit: MarketUnit.BaseToken,
+      isReduceOnly: order.reduceOnly === true ? 1 : 0,
+      positionSide: PositionSide.None,
+    });
+    const data = encodeFunctionData({
+      abi: placeAbi,
+      functionName: "placeOrder",
+      args: [
+        this.address as Hex,
+        oid,
+        this.symbolId,
+        orderParams,
+        marketOrder ? 0n : parseUnits(String(px), 18),
+        parseUnits(String(size), 18),
+        marketOrder
+          ? parseUnits(String(order.maxSlippagePct ?? 0.003), 18)
+          : 0n,
+        "0x0000000000000000000000000000000000000000",
+        0n,
+      ],
+    });
+    const txHash = await this.send(ORDER, data);
+    const receipt = this.pub
+      ? await this.pub
+          .getTransactionReceipt({ hash: txHash })
+          .catch(() => null)
+      : null;
+    return {
+      accepted: true,
+      confirmed: receipt?.status === "success",
+      txHash,
+      note: receipt ? undefined : "receipt-pending",
+    };
+  }
+
+  async placeHedgeLimit(order: HedgeOrder): Promise<HedgeOrderResult> {
+    return this.submitHedgeOrder(order, false);
+  }
+
+  async placeHedgeIoc(order: HedgeOrder): Promise<HedgeOrderResult> {
+    return this.submitHedgeOrder(order, true);
+  }
+
+  async closePosition(market: string, sizeBase?: number | null): Promise<void> {
+    if (this.dryRun) {
+      console.log(`[popdex:dry] closePosition ${market}${sizeBase != null ? ` size=${sizeBase}` : ""}`);
       return;
     }
     const snap = await this.snapshot(market);
     const pos = snap.position;
     if (!(Math.abs(pos) > this.minQty / 2)) return;
     const mid = snap.mid > 0 ? snap.mid : await this.mid();
-    const size = this.ensureSize(Math.abs(pos), mid);
+    const want =
+      sizeBase != null && sizeBase > 0 ? Math.min(Math.abs(sizeBase), Math.abs(pos)) : Math.abs(pos);
+    const size = this.ensureSize(want, mid);
     const isLong = pos > 0;
     const orderParams = packOrderParams({
       category: Category.Futures,

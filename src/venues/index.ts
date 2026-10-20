@@ -1,9 +1,12 @@
 import type { VenueId } from "../types.js";
 import { DecibelExecutor } from "./decibel.js";
+import { EntropyExecutor } from "./entropy.js";
 import { ExtendedExecutor } from "./extended.js";
 import { N1Executor } from "./n1.js";
 import { NadoExecutor } from "./nado.js";
 import { PhoenixExecutor } from "./phoenix.js";
+import { LighterExecutor } from "./lighter.js";
+import { PacificaExecutor } from "./pacifica.js";
 import { PopdexExecutor } from "./popdex.js";
 import { RisexExecutor } from "./risex.js";
 import type { VenueExecutor } from "./types.js";
@@ -26,6 +29,12 @@ export function createExecutor(venue: VenueId, dryRun: boolean): VenueExecutor {
       return new NadoExecutor(dryRun);
     case "popdex":
       return new PopdexExecutor(dryRun);
+    case "entropy":
+      return new EntropyExecutor(dryRun);
+    case "pacifica":
+      return new PacificaExecutor(dryRun);
+    case "lighter":
+      return new LighterExecutor(dryRun);
   }
 }
 

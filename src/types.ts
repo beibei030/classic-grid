@@ -6,7 +6,10 @@ export type VenueId =
   | "phoenix"
   | "phoenix2"
   | "nado"
-  | "popdex";
+  | "popdex"
+  | "entropy"
+  | "pacifica"
+  | "lighter";
 export type Side = "buy" | "sell";
 export type GridMode = "neutral" | "long" | "short";
 
@@ -19,6 +22,16 @@ export type GridParams = {
   halfBand: number;
   /** 格子数（价格线 = gridCount+1）；上下各 gridCount/2 */
   gridCount: number;
+  /** 保持原格距/size，在原下沿之外额外增加的格数 */
+  lowerExtraLevels?: number;
+  /** 保持原格距/size，在上沿增加（正数）或删除（负数）的格数 */
+  upperLevelDelta?: number;
+  /** 前紧后松：中心半幅，相对锚点（如 0.04 = ±4%） */
+  innerHalfPct?: number;
+  /** 前紧后松：外层半幅，相对锚点（如 0.08 = ±8%） */
+  outerHalfPct?: number;
+  /** 前紧后松：中心区占用的格数比例 */
+  innerFrac?: number;
   sizeBase: number;
   leverage: number;
   /** 单边费率（maker），用于间距校验 */
@@ -62,6 +75,8 @@ export type VenueSnapshot = {
   unrealizedPnl?: number;
   /** 账户权益（USD）；读不到则为 undefined */
   equityUsd?: number;
+  /** 官方爆仓价；读不到则省略 */
+  liquidationPrice?: number;
 };
 
 export type Intent =

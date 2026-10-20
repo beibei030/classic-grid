@@ -5,7 +5,7 @@ import { FillMode, Nord, NordUser, Side, calcCurrPosLiqPrice } from "@n1xyz/nord
 import { Connection } from "@solana/web3.js";
 import type { Intent, VenueSnapshot } from "../types.js";
 import { loadEnv } from "../loadEnv.js";
-import { dryApply, type ApplyResult, type VenueExecutor } from "./types.js";
+import { dryApply, type ApplyResult, type HardStopSpec, type VenueExecutor } from "./types.js";
 
 const MARKET_ID = 0;
 const DEFAULT_APP = "zoau54n5U24GHNKqyoziVaVxgsiQYnPMx33fKmLLCT5";
@@ -47,6 +47,7 @@ export class N1Executor implements VenueExecutor {
   private user: any = null;
   private accountId: number | null = null;
   private sessionExpiresAt = 0;
+  private stopIds: { up?: bigint; dn?: bigint; upPx?: number; dnPx?: number } = {};
   constructor(private dryRun: boolean) {}
 
   async connect(): Promise<void> {
@@ -256,13 +257,19 @@ export class N1Executor implements VenueExecutor {
     );
     await this.ensureSession();
     for (const row of rows) {
-      await this.user.cancelOrder(BigInt(row.orderId), this.accountId);
+      try {
+        await this.user.cancelOrder(BigInt(row.orderId), this.accountId);
+      } catch (e: any) {
+        console.warn(
+          `[n1] cancelAll skip ${row.orderId}: ${String(e?.message || e).slice(0, 80)}`
+        );
+      }
     }
   }
 
-  async closePosition(market: string): Promise<void> {
+  async closePosition(market: string, sizeBase?: number | null): Promise<void> {
     if (this.dryRun) {
-      console.log(`[n1:dry] closePosition ${market}`);
+      console.log(`[n1:dry] closePosition ${market}${sizeBase != null ? ` size=${sizeBase}` : ""}`);
       return;
     }
     if (process.env.N1_TRADING_ARMED !== "YES") {
@@ -274,6 +281,8 @@ export class N1Executor implements VenueExecutor {
     if (Math.abs(pos) < 1e-12) return;
     const mid = snap.mid > 0 ? snap.mid : 0;
     if (!(mid > 0)) throw new Error("closePosition: no mid");
+    const cut =
+      sizeBase != null && sizeBase > 0 ? Math.min(Math.abs(sizeBase), Math.abs(pos)) : Math.abs(pos);
     const side = pos > 0 ? Side.Ask : Side.Bid;
     const price = pos > 0 ? mid * 0.992 : mid * 1.008;
     await this.ensureSession();
@@ -282,11 +291,153 @@ export class N1Executor implements VenueExecutor {
       side,
       fillMode: FillMode.ImmediateOrCancel,
       isReduceOnly: true,
-      size: Math.abs(pos),
+      size: cut,
       price,
       accountId: this.accountId,
       clientOrderId: clientOrderId(`flat:${Date.now()}`),
     });
     if (!receipt.orderId) throw new Error("N1 close missing orderId");
+  }
+
+  private asTriggerRows(raw: any): any[] {
+    if (Array.isArray(raw)) return raw;
+    if (Array.isArray(raw?.items)) return raw.items;
+    if (Array.isArray(raw?.triggers)) return raw.triggers;
+    if (Array.isArray(raw?.data)) return raw.data;
+    return [];
+  }
+
+  private async listMarketTriggers(): Promise<any[]> {
+    const raw = await this.nord.getAccountTriggers({ accountId: this.accountId });
+    const rows = this.asTriggerRows(raw);
+    const mine = rows.filter((row: any) => {
+      const mid = Number(row.marketId ?? row.market_id ?? row.trigger?.marketId);
+      return !Number.isFinite(mid) || mid === MARKET_ID;
+    });
+    if (!mine.length && raw && !Array.isArray(raw)) {
+      console.log(`[n1] hard-stop list keys=${Object.keys(raw).join(",")}`);
+    }
+    return mine;
+  }
+
+  private triggerIdOf(row: any): bigint | null {
+    const id =
+      row?.triggerId ??
+      row?.trigger_id ??
+      row?.id ??
+      row?.trigger?.triggerId ??
+      row?.trigger?.trigger_id ??
+      row?.trigger?.id;
+    if (id == null || id === "") return null;
+    try {
+      return BigInt(id);
+    } catch {
+      return null;
+    }
+  }
+
+  private triggerPxOf(row: any): number {
+    const t = row?.trigger || row;
+    return num(t.trigger_price ?? t.triggerPrice ?? row?.triggerPrice);
+  }
+
+  private nearStopPx(px: number, target: number): boolean {
+    return px > 0 && target > 0 && Math.abs(px - target) / target < 0.002;
+  }
+
+  private async removeTriggerIds(ids: Array<bigint | null | undefined>): Promise<number> {
+    let n = 0;
+    for (const id of ids) {
+      if (!id) continue;
+      try {
+        await this.user.removeTrigger({
+          marketId: MARKET_ID,
+          triggerId: id,
+          accountId: this.accountId,
+        });
+        n += 1;
+      } catch {
+        /* already gone */
+      }
+    }
+    return n;
+  }
+
+  async syncHardStops(spec: HardStopSpec): Promise<{ armed: boolean; note?: string }> {
+    if (this.dryRun) return { armed: true, note: "dry" };
+    this.ensure();
+    await this.ensureSession();
+    const listed = await this.listMarketTriggers();
+    if (listed.length) {
+      console.log(
+        `[n1] hard-stop listed=${listed.length} keys=${Object.keys(listed[0] || {}).join(",")} px=${this.triggerPxOf(listed[0])}`
+      );
+    }
+    const upHits = listed.filter((row) => this.nearStopPx(this.triggerPxOf(row), spec.hardUp));
+    const dnHits = listed.filter((row) => this.nearStopPx(this.triggerPxOf(row), spec.hardDn));
+    let keepUp = this.triggerIdOf(upHits[0]);
+    let keepDn = this.triggerIdOf(dnHits[0]);
+    // 对不上价就全清，避免 16 张上限上继续 add
+    if (listed.length && !keepUp && !keepDn) {
+      keepUp = undefined;
+      keepDn = undefined;
+    }
+    const extras = listed
+      .map((row) => this.triggerIdOf(row))
+      .filter((id): id is bigint => id != null && id !== keepUp && id !== keepDn);
+    if (extras.length) {
+      const removed = await this.removeTriggerIds(extras);
+      console.log(
+        `[n1] hard-stop reconcile listed=${listed.length} removed=${removed} px0=${this.triggerPxOf(listed[0])}`
+      );
+    }
+    this.stopIds = {
+      up: keepUp || undefined,
+      dn: keepDn || undefined,
+      upPx: keepUp ? spec.hardUp : undefined,
+      dnPx: keepDn ? spec.hardDn : undefined,
+    };
+    if (keepUp && keepDn) return { armed: true, note: extras.length ? "deduped" : "kept" };
+
+    const addOne = async (side: typeof Side.Bid | typeof Side.Ask, px: number) => {
+      return this.user.addTrigger({
+        marketId: MARKET_ID,
+        side,
+        kind: 0, // TriggerKind.StopLoss
+        triggerPrice: px,
+        accountId: this.accountId,
+      });
+    };
+    try {
+      if (!keepUp) {
+        const up = await addOne(Side.Bid, spec.hardUp);
+        this.stopIds.up = up.triggerId;
+        this.stopIds.upPx = spec.hardUp;
+      }
+      if (!keepDn) {
+        const dn = await addOne(Side.Ask, spec.hardDn);
+        this.stopIds.dn = dn.triggerId;
+        this.stopIds.dnPx = spec.hardDn;
+      }
+    } catch (e: any) {
+      const left = await this.listMarketTriggers().catch(() => []);
+      await this.removeTriggerIds(left.map((row) => this.triggerIdOf(row)));
+      this.stopIds = {};
+      throw e;
+    }
+    return { armed: true, note: "n1-trigger" };
+  }
+
+  async cancelHardStops(_market: string): Promise<void> {
+    if (this.dryRun || !this.user) return;
+    await this.ensureSession();
+    const listed = await this.listMarketTriggers().catch(() => []);
+    const ids = [
+      ...listed.map((row) => this.triggerIdOf(row)),
+      this.stopIds.up,
+      this.stopIds.dn,
+    ];
+    await this.removeTriggerIds(ids);
+    this.stopIds = {};
   }
 }
