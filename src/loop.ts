@@ -392,23 +392,9 @@ async function executeVenueCommands(
           break;
         }
         case "close-half": {
-          // 仅 Phoenix/Extended 支持部分平仓（closePosition 带 sizeBase）；其它所会忽略参数导致全平，故禁止
-          const partialOk =
-            rt.ex.id === "phoenix" || rt.ex.id === "phoenix2" || rt.ex.id === "extended";
-          if (!partialOk) {
-            const msg = `${tag} 该所不支持部分平仓，已跳过（请用清仓重铺或手动处理）`;
-            console.error(msg);
-            void tgError(rt.ex.id, "venue-control close-half: 该所不支持部分平仓");
-            break;
-          }
-          const snap = await rt.ex.snapshot(market);
-          const abs = Math.abs(snap.position);
-          if (abs > 0) {
-            await (rt.ex as any).closePosition(market, abs / 2);
-            console.log(`${tag} closed half ≈${(abs / 2).toFixed(6)}`);
-          } else {
-            console.log(`${tag} no position`);
-          }
+          const msg = `${tag} 该所不支持部分平仓，已跳过（请用清仓重铺或手动处理）`;
+          console.error(msg);
+          void tgError(rt.ex.id, "venue-control close-half: 该所不支持部分平仓");
           break;
         }
         case "pause": {
@@ -617,7 +603,6 @@ async function tickOne(
       venuePaused &&
       (rt.ex.id === "popdex" ||
         rt.ex.id === "decibel" ||
-        rt.ex.id === "lighter" ||
         rt.ex.id === "risex") &&
       stopLossEnabled(rt.ex.id) &&
       !!rt.params;
@@ -838,9 +823,7 @@ async function tickOne(
     const ttlMs =
       rt.ex.id === "popdex" ||
       rt.ex.id === "risex" ||
-      rt.ex.id === "decibel" ||
-      rt.ex.id === "pacifica" ||
-      rt.ex.id === "lighter"
+      rt.ex.id === "decibel"
         ? 120_000
         : 45_000;
     let remain = placedN;

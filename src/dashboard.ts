@@ -312,19 +312,7 @@ export function startDashboardServer(port: number): http.Server | null {
             "flat-reseed",
             "refill",
           ];
-          const validVenues = [
-            "extended",
-            "risex",
-            "decibel",
-            "n1",
-            "phoenix",
-            "phoenix2",
-            "nado",
-            "popdex",
-            "entropy",
-            "pacifica",
-            "lighter",
-          ];
+          const validVenues = ["decibel", "n1", "popdex", "risex"];
           if (!venue || !validVenues.includes(venue) || !actions.includes(action)) {
             res.writeHead(400, {
               "Content-Type": "application/json; charset=utf-8",

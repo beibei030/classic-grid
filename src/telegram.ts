@@ -18,17 +18,10 @@ let tradePumping = false;
 let lastPosMap: Record<string, number> | null = null;
 
 const VENUE_LABEL: Record<string, string> = {
-  extended: "Extended",
   risex: "RISEx",
   decibel: "Decibel",
   n1: "N1",
-  phoenix: "Phoenix",
-  phoenix2: "ph2号",
-  nado: "Nado",
   popdex: "PopDEX",
-  entropy: "Entropy",
-  pacifica: "Pacifica",
-  lighter: "Lighter",
 };
 
 function venueLabel(id: string): string {
@@ -232,29 +225,8 @@ export function isSoftPlaceError(venue: string, msg: string): boolean {
   ) {
     return true;
   }
-  if (venue === "phoenix" || venue === "phoenix2") {
-    return /place_order|MatchingEngine|Simulation failed|block height|tx 过期|穿价|CU 不足/i.test(
-      short
-    );
-  }
-  if (venue === "nado") {
-    return /2008|post-only|crosses the book|穿价/i.test(short);
-  }
   if (venue === "popdex") {
     return /post.?only|cross|穿价|would be (immediately )?filled|rejected|unknown RPC error/i.test(
-      short
-    );
-  }
-  if (venue === "entropy") {
-    return /post.?only|alo|would immediately match|crosses|reduce only/i.test(short);
-  }
-  if (venue === "pacifica") {
-    return /post.?only|alo|would immediately match|crosses|reduce only|would be (immediately )?filled/i.test(
-      short
-    );
-  }
-  if (venue === "lighter") {
-    return /post.?only|would immediately|crosses|invalid price|not enough margin|insufficient/i.test(
       short
     );
   }

@@ -1,11 +1,11 @@
-# Classic Grid — 八所经典网格（开源）
+# Classic Grid — 四所经典网格（开源）
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](./package.json)
 
 等差网格：现价下买上卖，**成交后补相邻反向单**；启动校验格距 > 双边手续费、保证金预检。
 
-适配器：**Extended · RISEx · Decibel · N1 · Phoenix · Phoenix2 · Nado · PopDEX**
+适配器：**Decibel · N1 · PopDEX · RISEx**
 
 > 开源模板，**不含私钥 / API Key / Telegram Token / 服务器地址 / 账本文件**。
 > 生产运行只需要：`cp .env.example .env`，填上你的密钥，其余代码零改动。
@@ -16,13 +16,10 @@
 
 | 交易所 | 链接 |
 |--------|------|
-| **Extended** | https://app.extended.exchange/join/AIQIANG888 |
-| **RISEx** | https://rise.trade/（暂无推荐码） |
 | **Decibel** | https://app.decibel.trade/r/K7B2QM |
 | **N1** | https://app.n1.xyz/r/orderly-loop-curve |
-| **Phoenix / Phoenix2** | https://phoenix.trade/?code=35D5NJH3 |
-| **Nado** | https://app.nado.xyz?join=aiqiang888 |
 | **PopDEX** | https://app.popdex.xyz/referral?referralCode=AIQIANG |
+| **RISEx** | https://www.rise.trade/invite/aiqiang |
 
 ---
 
@@ -77,7 +74,7 @@ cp .env.example .env
 
 打开 `.env`，按需填写。关键项：
 
-- `VENUES=` 只开你有密钥的所，例如 `VENUES=extended,phoenix`
+- `VENUES=` 只开你有密钥的所，例如 `VENUES=decibel,n1,popdex,risex`
 - 各所的 API / 私钥 / keypair 路径（`secrets/*.key`、`secrets/*.json`，已在 `.gitignore`）
 - 默认 `DRY_RUN=1`（模拟，只读看板，不下单）
 - 实盘必须**同时**满足：`DRY_RUN=0` 且 `LIVE_CONFIRM=YES`
@@ -133,18 +130,14 @@ TELEGRAM_CHAT_IDS=      # 你的 chat_id；多个用逗号分隔
 
 ## 默认参数（可改）
 
-| 所 | 格数 | 杠杆 | 半幅 | 备注 |
+| 所 | 格数 | 杠杆 | 带宽 | 预算 |
 |----|------|------|------|------|
-| Extended | 80 | 30x | ±4.6% | Starknet，预算 800U×70% |
-| RISEx | 46 | 25x | ±3% | 单笔偏大，注意降风险 |
-| Decibel | 80 | 30x | ±5% | Aptos，`DECIBEL_EQUITY_USD` |
-| N1 | 80 | 30x | ±5% | Solana，`N1_EQUITY_USD`，PostOnly |
-| Phoenix | 80 | 30x | ±4.5% | Solana，`PHOENIX_HALF_BAND` |
-| Phoenix2 | 80 | 30x | ±4.5% | 同 Phoenix，独立 keypair |
-| Nado | 80 | 30x | ±4.5% | Ink 链，`NADO_HALF_BAND` |
-| PopDEX | 80 | 30x | ±4.5% | Morph Tachyon，`POPDEX_EQUITY_USD` |
+| Decibel | 90 | 30x | 中心 ±4% / 外层 ±8% | 1000U × 60% |
+| N1 | 100 | 30x | 中心更密（80% 档）/ 外层 ±8% | 1000U × 45% |
+| PopDEX | 90 | 30x | 中心 ±4% / 外层 ±8% | 1000U × 60% |
+| RISEx | 46 | 25x | 中心 ±4% / 外层 ±8% | 1000U × 60%，挂单硬顶 50 |
 
-`GRID_MARGIN_FRAC` 默认 `0.7`（保证金占预算 70%）。各所格数/杠杆/半幅均可用对应 `*_LEVERAGE`、`*_HALF_BAND`、`*_EQUITY_USD` 覆盖。
+各所可用对应 `*_LEVERAGE`、`*_EQUITY_USD`、`*_MARGIN_FRAC` 覆盖。
 
 ---
 
@@ -161,8 +154,8 @@ src/
   telegram.ts         # TG 通知
   botControl.ts       # 紧急暂停 / 恢复
   venues/             # 各所适配器（snapshot/apply/cancelAll/closePosition）
-    extended.ts risex.ts decibel.ts decibelLive.ts n1.ts
-    phoenix.ts nado.ts popdex.ts index.ts types.ts
+    risex.ts decibel.ts decibelLive.ts n1.ts popdex.ts
+    index.ts types.ts
 public/index.html     # 看板前端（纯静态）
 docs/CHALLENGES.md demo-dashboard.html images/
 vendor/               # 轻量封装，无密钥

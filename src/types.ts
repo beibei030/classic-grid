@@ -1,15 +1,4 @@
-export type VenueId =
-  | "extended"
-  | "risex"
-  | "decibel"
-  | "n1"
-  | "phoenix"
-  | "phoenix2"
-  | "nado"
-  | "popdex"
-  | "entropy"
-  | "pacifica"
-  | "lighter";
+export type VenueId = "decibel" | "n1" | "popdex" | "risex";
 export type Side = "buy" | "sell";
 export type GridMode = "neutral" | "long" | "short";
 

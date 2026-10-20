@@ -320,9 +320,9 @@
 
   </main>
   <script>
-    const LABELS = { extended: "Extended", risex: "RISEx", decibel: "Decibel", n1: "N1", phoenix: "Phoenix", phoenix2: "ph2号", nado: "Nado", popdex: "PopDEX", entropy: "Entropy", pacifica: "Pacifica", lighter: "Lighter" };
-    const COLORS = { extended: "#58a6ff", risex: "#3fb950", decibel: "#d29922", n1: "#39c5cf", phoenix: "#f78166", phoenix2: "#ff9f6b", nado: "#a371f7", popdex: "#e85d75", entropy: "#7ee787", pacifica: "#c4b5fd", lighter: "#f0883e" };
-    const ORDER = ["decibel", "n1", "entropy", "extended", "risex", "phoenix", "phoenix2", "nado", "popdex", "pacifica", "lighter"];
+    const LABELS = { risex: "RISEx", decibel: "Decibel", n1: "N1", popdex: "PopDEX" };
+    const COLORS = { risex: "#3fb950", decibel: "#d29922", n1: "#39c5cf", popdex: "#e85d75" };
+    const ORDER = ["decibel", "n1", "popdex", "risex"];
 
     function el(id) { return document.getElementById(id); }
     function setText(id, text, className) {
